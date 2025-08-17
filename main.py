@@ -13,9 +13,9 @@ CHAT_ID_FOR_NOTIFICATIONS = os.getenv('CHAT_ID_FOR_NOTIFICATIONS')
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 DATA_FILE = 'data.json'
 chat_data = {}
+
 def save_data():
     try:
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
@@ -23,6 +23,7 @@ def save_data():
         logger.info("Данные успешно сохранены.")
     except Exception as e:
         logger.error(f"Ошибка при сохранении данных: {e}")
+
 def load_data():
     global chat_data
     try:
@@ -33,25 +34,23 @@ def load_data():
     except (FileNotFoundError, json.JSONDecodeError, Exception) as e:
         logger.error(f"Ошибка при загрузке данных: {e}. Начинаем с пустыми данными.")
         chat_data = {}
+
 def start(update: Update, context: CallbackContext) -> None:
     update.message.reply_text(
         'Привет! Я бот для учета расходов.\n\n'
         '✅ *Общие расходы*: `сумма описание`\n'
-        '   (например: `1500 продукты`)\n\n'
         '✅ *Личный долг*: Ответьте на сообщение человека, '
         'которому вы должны, и напишите:\n'
-        '`/owe сумма описание`\n'
-        '   (например: `/owe 1000 подарок`)\n\n'
+        '`/owe сумма описание`\n\n'
         'Другие команды:\n'
-        '/start_tracking - Начать учет в чате\n'
-        '/reset - Полностью сбросить все расходы\n'
-        '/reset_debts - Сбросить только личные долги\n'
-        '/getchatid - Узнать ID этого чата',
+        '/start_tracking, /reset, /reset_debts, /getchatid',
         parse_mode=ParseMode.MARKDOWN
     )
+
 def get_chat_id(update: Update, context: CallbackContext) -> None:
     chat_id = update.message.chat_id
-    update.message.reply_text(f"ID этого чата: `{chat_id}`\n\nСкопируйте это число и добавьте в .env файл.")
+    update.message.reply_text(f"ID этого чата: `{chat_id}`")
+
 def start_tracking(update: Update, context: CallbackContext) -> None:
     chat_id = update.message.chat_id
     if chat_id in chat_data:
@@ -66,6 +65,7 @@ def start_tracking(update: Update, context: CallbackContext) -> None:
         logger.info(f"Начат учет в чате {chat_id}")
     except BadRequest:
         update.message.reply_text('Не удалось закрепить сообщение. Сделайте меня администратором.')
+
 def reset_tracking(update: Update, context: CallbackContext) -> None:
     chat_id = update.message.chat_id
     if chat_id in chat_data:
@@ -77,6 +77,7 @@ def reset_tracking(update: Update, context: CallbackContext) -> None:
         update.message.reply_text('Все расходы и долги сброшены.')
     else:
         update.message.reply_text('Учет не ведется.')
+
 def reset_debts(update: Update, context: CallbackContext) -> None:
     chat_id = update.message.chat_id
     if chat_id in chat_data and 'debts' in chat_data[chat_id]:
@@ -86,6 +87,7 @@ def reset_debts(update: Update, context: CallbackContext) -> None:
         update_summary_message(context.bot, chat_id)
     else:
         update.message.reply_text('Учет не ведется.')
+
 def owe(update: Update, context: CallbackContext) -> None:
     if not update.message.reply_to_message:
         update.message.reply_text("Ошибка: нужно ответить на сообщение того, кому вы должны.")
@@ -117,6 +119,7 @@ def owe(update: Update, context: CallbackContext) -> None:
     except Exception as e:
         logger.error(f"Ошибка в команде /owe: {e}")
         update.message.reply_text("Произошла непредвиденная ошибка при записи долга.")
+
 def update_summary_message(bot: Bot, chat_id: int) -> None:
     if chat_id not in chat_data: return
     data = chat_data[chat_id]
@@ -162,6 +165,7 @@ def update_summary_message(bot: Bot, chat_id: int) -> None:
     try:
         bot.edit_message_text(chat_id=chat_id, message_id=data['message_id'], text=final_text, parse_mode=ParseMode.MARKDOWN_V2)
     except BadRequest: pass
+
 def handle_expense(update: Update, context: CallbackContext) -> None:
     chat_id = update.message.chat_id
     if chat_id not in chat_data: return
@@ -170,15 +174,31 @@ def handle_expense(update: Update, context: CallbackContext) -> None:
         if len(parts) < 2: return
         amount = float(parts[0].replace(',', '.'))
         if amount <= 0: return
+
         user = update.message.from_user
         user_id_str = str(user.id)
         users = chat_data[chat_id].setdefault('users', {})
+
         if user_id_str not in users:
             users[user_id_str] = {'name': user.first_name, 'total': 0.0}
+        total_before = users[user_id_str]['total']
+
         users[user_id_str]['total'] += amount
+        total_after = users[user_id_str]['total']
+
         save_data()
         logger.info(f"Добавлен общий расход {amount} от {user.first_name} в чате {chat_id}")
+
+        reply_text = (
+            f"✅ Записал!\n\n"
+            f"**{user.first_name}**:\n"
+            f"Было потрачено: {total_before:.2f} лир\n"
+            f"Стало потрачено: {total_after:.2f} лир"
+        )
+        update.message.reply_text(reply_text, parse_mode=ParseMode.MARKDOWN)
+
         update_summary_message(context.bot, chat_id)
+
     except (ValueError, IndexError):
         pass
     except TimedOut:
@@ -193,13 +213,14 @@ def main() -> None:
     if CHAT_ID_FOR_NOTIFICATIONS:
         try:
             bot = Bot(token=TELEGRAM_BOT_TOKEN)
-            bot.send_message(chat_id=CHAT_ID_FOR_NOTIFICATIONS, text="✅ Бот запущен и снова в сети!")
+            bot.send_message(chat_id=CHAT_ID_FOR_NOTIFICATIONS, text="✅ Бот запущен и снова в сети! (v1.2)")
             logger.info(f"Отправлено уведомление о запуске в чат {CHAT_ID_FOR_NOTIFICATIONS}")
         except Exception as e:
             logger.error(f"Не удалось отправить уведомление о запуске: {e}")
     else:
-        logger.warning("Переменная CHAT_ID_FOR_NOTIFICATIONS не задана в .env. Уведомление о запуске не будет отправлено.")
+        logger.warning("CHAT_ID не задан. Уведомление о запуске не будет отправлено.")
 
+    # Handlers
     dispatcher.add_handler(CommandHandler("start", start))
     dispatcher.add_handler(CommandHandler("getchatid", get_chat_id))
     dispatcher.add_handler(CommandHandler("start_tracking", start_tracking))
@@ -209,7 +230,7 @@ def main() -> None:
     dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_expense))
 
     updater.start_polling(drop_pending_updates=False)
-    logger.info("Бот запущен и готов обрабатывать пропущенные сообщения...")
+    logger.info("Бот запущен...")
     updater.idle()
 
 if __name__ == '__main__':
