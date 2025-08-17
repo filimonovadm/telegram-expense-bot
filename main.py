@@ -9,11 +9,11 @@ from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, Callb
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+CHAT_ID_FOR_NOTIFICATIONS = os.getenv('CHAT_ID_FOR_NOTIFICATIONS')
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 DATA_FILE = 'data.json'
 chat_data = {}
 def save_data():
@@ -45,9 +45,13 @@ def start(update: Update, context: CallbackContext) -> None:
         'Другие команды:\n'
         '/start_tracking - Начать учет в чате\n'
         '/reset - Полностью сбросить все расходы\n'
-        '/reset_debts - Сбросить только личные долги',
+        '/reset_debts - Сбросить только личные долги\n'
+        '/getchatid - Узнать ID этого чата',
         parse_mode=ParseMode.MARKDOWN
     )
+def get_chat_id(update: Update, context: CallbackContext) -> None:
+    chat_id = update.message.chat_id
+    update.message.reply_text(f"ID этого чата: `{chat_id}`\n\nСкопируйте это число и добавьте в .env файл.")
 def start_tracking(update: Update, context: CallbackContext) -> None:
     chat_id = update.message.chat_id
     if chat_id in chat_data:
@@ -180,18 +184,33 @@ def handle_expense(update: Update, context: CallbackContext) -> None:
     except TimedOut:
         logger.warning("Произошел тайм-аут при обработке расхода. Ждем повтора.")
         pass
+
 def main() -> None:
     load_data()
     updater = Updater(TELEGRAM_BOT_TOKEN)
     dispatcher = updater.dispatcher
+
+    if CHAT_ID_FOR_NOTIFICATIONS:
+        try:
+            bot = Bot(token=TELEGRAM_BOT_TOKEN)
+            bot.send_message(chat_id=CHAT_ID_FOR_NOTIFICATIONS, text="✅ Бот запущен и снова в сети!")
+            logger.info(f"Отправлено уведомление о запуске в чат {CHAT_ID_FOR_NOTIFICATIONS}")
+        except Exception as e:
+            logger.error(f"Не удалось отправить уведомление о запуске: {e}")
+    else:
+        logger.warning("Переменная CHAT_ID_FOR_NOTIFICATIONS не задана в .env. Уведомление о запуске не будет отправлено.")
+
     dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("getchatid", get_chat_id))
     dispatcher.add_handler(CommandHandler("start_tracking", start_tracking))
     dispatcher.add_handler(CommandHandler("reset", reset_tracking))
     dispatcher.add_handler(CommandHandler("owe", owe))
     dispatcher.add_handler(CommandHandler("reset_debts", reset_debts))
     dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_expense))
+
     updater.start_polling(drop_pending_updates=False)
     logger.info("Бот запущен и готов обрабатывать пропущенные сообщения...")
     updater.idle()
+
 if __name__ == '__main__':
     main()
