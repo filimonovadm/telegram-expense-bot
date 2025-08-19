@@ -28,8 +28,8 @@ def load_data():
     global chat_data
     try:
         with open(DATA_FILE, 'r', encoding='utf-8') as f:
-            chat_data = json.load(f)
-            chat_data = {int(k): v for k, v in chat_data.items()}
+            loaded_data = json.load(f)
+            chat_data = {int(k): v for k, v in loaded_data.items()}
             logger.info("Данные успешно загружены.")
     except (FileNotFoundError, json.JSONDecodeError, Exception) as e:
         logger.error(f"Ошибка при загрузке данных: {e}. Начинаем с пустыми данными.")
@@ -37,12 +37,16 @@ def load_data():
 
 def start(update: Update, context: CallbackContext) -> None:
     update.message.reply_text(
-        'Привет! Я бот для учета расходов (v1.3).\n\n'
-        '✅ *Новое*: Чтобы удалить расход/долг (включая старые!), ответьте (`Reply`) на него командой `/delete`.\n\n'
-        '✅ *Общие расходы*: `сумма описание`\n'
-        '✅ *Личный долг*: Ответьте на сообщение и напишите:\n`/owe сумма описание`',
+        'Привет! Я бот для учета расходов (v1.4).\n\n'
+        '✅ *Новое*: Команда /ping, чтобы проверить, онлайн ли я.\n'
+        '✅ *Новое*: Теперь я сообщаю о сообщениях, которые не могу понять.\n\n'
+        'Чтобы удалить запись, ответьте на нее командой `/delete`.',
         parse_mode=ParseMode.MARKDOWN
     )
+
+def ping(update: Update, context: CallbackContext) -> None:
+    """Проверяет, что бот онлайн."""
+    update.message.reply_text("Pong! Я в сети и готов к работе.")
 
 def get_chat_id(update: Update, context: CallbackContext) -> None:
     chat_id = update.message.chat_id
@@ -112,18 +116,16 @@ def owe(update: Update, context: CallbackContext) -> None:
     except (IndexError, ValueError):
         message.reply_text("Неверный формат. Используйте: /owe <сумма> <описание>")
     except TimedOut:
-        logger.warning("Произошел тайм-аут. Telegram должен повторить отправку.")
+        logger.warning("Произошел тайм-аут.")
     except Exception as e:
         logger.error(f"Ошибка в команде /owe: {e}")
-        message.reply_text("Произошла непредвиденная ошибка при записи долга.")
+        message.reply_text("Произошла ошибка при записи долга.")
 
 def update_summary_message(bot: Bot, chat_id: int) -> None:
     if chat_id not in chat_data: return
     data = chat_data[chat_id]
-    user_totals = {}
-    user_names = {}
-    users_data = data.get('users', {})
-    for user_id_str, user_info in users_data.items():
+    user_totals, user_names = {}, {}
+    for user_id_str, user_info in data.get('users', {}).items():
         user_id = int(user_id_str)
         user_names[user_id] = user_info['name']
         if 'expenses' in user_info:
@@ -131,8 +133,7 @@ def update_summary_message(bot: Bot, chat_id: int) -> None:
         else:
             total = user_info.get('total', 0.0)
         user_totals[user_id] = total
-    debts_data = data.get('debts', [])
-    for debt in debts_data:
+    for debt in data.get('debts', []):
         user_names.setdefault(int(debt['from_id']), debt['from_name'])
         user_names.setdefault(int(debt['to_id']), debt['to_name'])
     summary_lines, final_balances = [], {}
@@ -145,6 +146,7 @@ def update_summary_message(bot: Bot, chat_id: int) -> None:
             final_balances[user_id] = total - average_spent
             summary_lines.append(f"  - {user_names.get(user_id, 'Unknown')}: {total:.2f} лир")
         summary_lines.extend([f"\n*Всего потрачено:* {total_spent:.2f} лир", f"*Средний расход:* {average_spent:.2f} лир"])
+    debts_data = data.get('debts', [])
     if debts_data:
         if not summary_lines or "\n*Личные долги:*" not in summary_lines:
              summary_lines.append("\n*Личные долги:*")
@@ -176,11 +178,19 @@ def handle_expense(update: Update, context: CallbackContext) -> None:
     message = update.message
     chat_id = message.chat_id
     if chat_id not in chat_data: return
+
     try:
         parts = message.text.split(maxsplit=1)
-        if len(parts) < 2: return
+        if len(parts) < 2:
+            message.reply_text("😕 Не могу распознать. Используйте формат `сумма описание`, например: `1500 продукты`")
+            return
+
         amount = float(parts[0].replace(',', '.'))
-        if amount <= 0: return
+        description = parts[1]
+        if amount <= 0:
+            message.reply_text("Сумма должна быть положительной.")
+            return
+
         user = message.from_user
         user_id_str = str(user.id)
         users = chat_data[chat_id].setdefault('users', {})
@@ -192,17 +202,24 @@ def handle_expense(update: Update, context: CallbackContext) -> None:
             if old_total > 0:
                 users[user_id_str]['expenses'].append({'amount': old_total, 'description': 'Сумма из предыдущих версий', 'message_id': 0})
             del users[user_id_str]['total']
+
         total_before = sum(exp['amount'] for exp in users[user_id_str].get('expenses', []))
-        expense_record = {'amount': amount, 'description': parts[1], 'message_id': message.message_id}
+        expense_record = {'amount': amount, 'description': description, 'message_id': message.message_id}
         users[user_id_str].setdefault('expenses', []).append(expense_record)
         save_data()
+
         total_after = total_before + amount
         logger.info(f"Добавлен общий расход {amount} от {user.first_name} в чате {chat_id}")
         reply_text = (f"✅ Записал!\n\n**{user.first_name}**:\nБыло потрачено: {total_before:.2f} лир\nСтало потрачено: {total_after:.2f} лир")
         message.reply_text(reply_text, parse_mode=ParseMode.MARKDOWN)
         update_summary_message(context.bot, chat_id)
-    except (ValueError, IndexError): pass
-    except TimedOut: logger.warning("Произошел тайм-аут при обработке расхода. Ждем повтора.")
+
+    except ValueError:
+        message.reply_text(f"😕 `{parts[0]}` - это не число. Используйте формат `сумма описание`, например: `1500 продукты`")
+    except IndexError:
+        message.reply_text("😕 Не хватает описания. Используйте формат `сумма описание`, например: `1500 продукты`")
+    except TimedOut:
+        logger.warning("Произошел тайм-аут.")
 
 def delete_entry(update: Update, context: CallbackContext) -> None:
     message = update.message
@@ -237,20 +254,17 @@ def delete_entry(update: Update, context: CallbackContext) -> None:
     if not deleted:
         replied_message_text = message.reply_to_message.text
         replied_author_id = message.reply_to_message.from_user.id
-
         if replied_message_text.lower().startswith('/owe'):
             try:
                 parts = replied_message_text.split(maxsplit=2)
                 amount = float(parts[1].replace(',', '.'))
                 reason = parts[2] if len(parts) > 2 else 'Без описания'
-
                 debt_to_delete_idx = -1
                 for i, debt in enumerate(debts):
                     if debt.get('message_id', -1) == 0 and str(replied_author_id) == debt.get('from_id') and debt.get('amount') == amount and debt.get('reason') == reason:
                         debt_to_delete_idx = i
                         deleted_info = f"Старый долг: {debt['from_name']} → {debt['to_name']} на {debt['amount']:.2f} лир"
                         break
-
                 if debt_to_delete_idx != -1:
                     del chat_data[chat_id]['debts'][debt_to_delete_idx]
                     deleted = True
@@ -261,7 +275,7 @@ def delete_entry(update: Update, context: CallbackContext) -> None:
         message.reply_text(f"✅ Запись удалена:\n`{deleted_info}`")
         update_summary_message(context.bot, chat_id)
     else:
-        message.reply_text("Не нашел такой записи в базе. Возможно, это не сообщение о расходе/долге.")
+        message.reply_text("Не нашел такой записи в базе.")
 
 def main() -> None:
     load_data()
@@ -271,12 +285,13 @@ def main() -> None:
     if CHAT_ID_FOR_NOTIFICATIONS:
         try:
             bot = Bot(token=TELEGRAM_BOT_TOKEN)
-            bot.send_message(chat_id=CHAT_ID_FOR_NOTIFICATIONS, text="✅ Бот запущен и снова в сети! (v1.3)")
+            bot.send_message(chat_id=CHAT_ID_FOR_NOTIFICATIONS, text="✅ Бот запущен и снова в сети! (v1.4)")
             logger.info(f"Отправлено уведомление о запуске в чат {CHAT_ID_FOR_NOTIFICATIONS}")
         except Exception as e:
             logger.error(f"Не удалось отправить уведомление о запуске: {e}")
 
     dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("ping", ping))
     dispatcher.add_handler(CommandHandler("getchatid", get_chat_id))
     dispatcher.add_handler(CommandHandler("start_tracking", start_tracking))
     dispatcher.add_handler(CommandHandler("reset", reset_tracking))
