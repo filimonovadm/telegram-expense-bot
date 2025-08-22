@@ -2,6 +2,7 @@ import logging
 import json
 import os
 import sqlite3
+import argparse
 from dotenv import load_dotenv
 from telegram import Update, ParseMode, Bot
 from telegram.error import BadRequest
@@ -9,8 +10,19 @@ from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, Callb
 
 load_dotenv()
 
+# --- Парсинг аргументов командной строки ---
+parser = argparse.ArgumentParser(description="Telegram Expense Bot")
+parser.add_argument('--env', choices=['prod', 'test'], default='prod', help='Specify the environment: prod or test')
+args = parser.parse_args()
+ENV = args.env
+
+# --- Загрузка переменных окружения ---
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-CHAT_ID_FOR_NOTIFICATIONS = os.getenv('CHAT_ID_FOR_NOTIFICATIONS')
+CHAT_ID_PROD = int(os.getenv('CHAT_ID_PROD'))
+CHAT_ID_TEST = int(os.getenv('CHAT_ID_TEST'))
+
+ACTIVE_CHAT_ID = CHAT_ID_PROD if ENV == 'prod' else CHAT_ID_TEST
+INACTIVE_CHAT_ID = CHAT_ID_TEST if ENV == 'prod' else CHAT_ID_PROD
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,7 +48,7 @@ def add_or_update_user(user_id, name):
 
 def start(update: Update, context: CallbackContext) -> None:
     update.message.reply_text(
-        'Привет! Я бот для учета расходов (v1.5.1).\n\n'
+        f'Привет! Я бот для учета расходов (v1.6 - {ENV.upper()}).\n\n'
         'Чтобы удалить запись, ответьте на нее командой `/delete`.',
         parse_mode=ParseMode.MARKDOWN
     )
@@ -185,6 +197,7 @@ def update_summary_message(bot: Bot, chat_id: int) -> None:
         return
 
     summary_message_id = chat_row['message_id']
+
     user_totals, user_names, final_balances = {}, {}, {}
 
     cursor.execute("SELECT user_id, name FROM users")
@@ -252,42 +265,51 @@ def update_summary_message(bot: Bot, chat_id: int) -> None:
             except Exception: pass
             new_message = bot.send_message(chat_id=chat_id, text=final_text, parse_mode=ParseMode.MARKDOWN_V2)
             bot.pin_chat_message(chat_id=chat_id, message_id=new_message.message_id)
-
-            with sqlite3.connect(DB_FILE) as conn_update:
-                cursor_update = conn_update.cursor()
-                cursor_update.execute("UPDATE chats SET message_id = ? WHERE chat_id = ?", (new_message.message_id, chat_id))
-                conn_update.commit()
+            cursor.execute("UPDATE chats SET message_id = ? WHERE chat_id = ?", (new_message.message_id, chat_id))
+            conn.commit()
         elif "Message is not modified" not in str(e):
             pass
         else:
             logger.error(f"Ошибка BadRequest при обновлении сообщения: {e}")
-    finally:
-        conn.close()
+    conn.close()
+
+def inactive_chat_handler(update: Update, context: CallbackContext) -> None:
+    """Отвечает на сообщения в неактивном чате."""
+    if ENV == 'test':
+        message = "Бот запущен в режиме разработки. Повторите попытку позже."
+    else: # prod
+        message = "Это тестовый чат. Бот работает в основном режиме."
+    update.message.reply_text(message)
 
 def main() -> None:
     setup_database()
     updater = Updater(TELEGRAM_BOT_TOKEN)
     dispatcher = updater.dispatcher
 
-    if CHAT_ID_FOR_NOTIFICATIONS:
+    if ACTIVE_CHAT_ID:
         try:
             bot = Bot(token=TELEGRAM_BOT_TOKEN)
-            bot.send_message(chat_id=CHAT_ID_FOR_NOTIFICATIONS, text="✅ Бот запущен и снова в сети! (v1.5.1)")
-            logger.info(f"Отправлено уведомление о запуске в чат {CHAT_ID_FOR_NOTIFICATIONS}")
+            bot.send_message(chat_id=ACTIVE_CHAT_ID, text=f"✅ Бот запущен и снова в сети! (v1.6 - {ENV.upper()})")
+            logger.info(f"Отправлено уведомление о запуске в чат {ACTIVE_CHAT_ID}")
         except Exception as e:
             logger.error(f"Не удалось отправить уведомление о запуске: {e}")
 
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("ping", ping))
-    dispatcher.add_handler(CommandHandler("getchatid", get_chat_id))
-    dispatcher.add_handler(CommandHandler("start_tracking", start_tracking))
-    dispatcher.add_handler(CommandHandler("reset", reset_tracking))
-    dispatcher.add_handler(CommandHandler("owe", owe))
-    dispatcher.add_handler(CommandHandler("delete", delete_entry))
-    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_expense))
+    active_chat_filter = Filters.chat(chat_id=ACTIVE_CHAT_ID)
+    inactive_chat_filter = Filters.chat_type.groups & ~active_chat_filter
+
+    dispatcher.add_handler(CommandHandler("start", start, filters=active_chat_filter))
+    dispatcher.add_handler(CommandHandler("ping", ping, filters=active_chat_filter))
+    dispatcher.add_handler(CommandHandler("getchatid", get_chat_id, filters=active_chat_filter))
+    dispatcher.add_handler(CommandHandler("start_tracking", start_tracking, filters=active_chat_filter))
+    dispatcher.add_handler(CommandHandler("reset", reset_tracking, filters=active_chat_filter))
+    dispatcher.add_handler(CommandHandler("owe", owe, filters=active_chat_filter))
+    dispatcher.add_handler(CommandHandler("delete", delete_entry, filters=active_chat_filter))
+    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command & active_chat_filter, handle_expense))
+
+    dispatcher.add_handler(MessageHandler(inactive_chat_filter, inactive_chat_handler))
 
     updater.start_polling(drop_pending_updates=False)
-    logger.info("Бот запущен...")
+    logger.info(f"Бот запущен в режиме: {ENV.upper()}")
     updater.idle()
 
 if __name__ == '__main__':
