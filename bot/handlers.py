@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 def send_startup_notification(bot: Bot):
     if ACTIVE_CHAT_ID:
         try:
-            bot.send_message(chat_id=ACTIVE_CHAT_ID, text=f"✅ Бот запущен и снова в сети! (v1.7 - {ENV.upper()})")
+            bot.send_message(chat_id=ACTIVE_CHAT_ID, text=f"✅ Бот запущен и снова в сети! (v2.0 - {ENV.upper()})")
             logger.info(f"Отправлено уведомление о запуске в чат {ACTIVE_CHAT_ID}")
         except Exception as e:
             logger.error(f"Не удалось отправить уведомление о запуске: {e}")
