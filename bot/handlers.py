@@ -3,23 +3,15 @@ import sqlite3
 from telegram import Update, ParseMode, Bot
 from telegram.error import BadRequest
 from telegram.ext import CallbackContext
-from .config import DB_FILE, ENV, ACTIVE_CHAT_ID
+from .config import DB_FILE
 from .database import add_or_update_user
 
 logger = logging.getLogger(__name__)
 
-def send_startup_notification(bot: Bot):
-    if ACTIVE_CHAT_ID:
-        try:
-            bot.send_message(chat_id=ACTIVE_CHAT_ID, text=f"✅ Бот запущен и снова в сети! (v2.0 - {ENV.upper()})")
-            logger.info(f"Отправлено уведомление о запуске в чат {ACTIVE_CHAT_ID}")
-        except Exception as e:
-            logger.error(f"Не удалось отправить уведомление о запуске: {e}")
-
 def start(update: Update, context: CallbackContext) -> None:
     update.message.reply_text(
-        f'Привет! Я бот для учета расходов (v1.7 - {ENV.upper()}).\n\n'
-        'Чтобы удалить запись, ответьте на нее командой `/delete`.',
+        'Привет! Я бот для учета расходов (v2.1).\n\n'
+        'Добавьте меня в ваш групповой чат, сделайте администратором (нужно для закрепления сообщений) и отправьте команду ```/start_tracking``` чтобы начать.',
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -36,7 +28,7 @@ def start_tracking(update: Update, context: CallbackContext) -> None:
     cursor = conn.cursor()
     cursor.execute("SELECT message_id FROM chats WHERE chat_id = ?", (chat_id,))
     if cursor.fetchone():
-        update.message.reply_text('Учет расходов уже ведется.')
+        update.message.reply_text('Учет расходов в этом чате уже ведется.')
         conn.close()
         return
 
@@ -51,25 +43,6 @@ def start_tracking(update: Update, context: CallbackContext) -> None:
         update.message.reply_text('Не удалось закрепить сообщение. Сделайте меня администратором.')
     finally:
         conn.close()
-
-def reset_tracking(update: Update, context: CallbackContext) -> None:
-    chat_id = update.message.chat_id
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT message_id FROM chats WHERE chat_id = ?", (chat_id,))
-    row = cursor.fetchone()
-    if row:
-        try:
-            context.bot.unpin_chat_message(chat_id, row[0])
-        except Exception: pass
-        cursor.execute("DELETE FROM expenses WHERE chat_id = ?", (chat_id,))
-        cursor.execute("DELETE FROM debts WHERE chat_id = ?", (chat_id,))
-        cursor.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
-        conn.commit()
-        update.message.reply_text('Все расходы и долги сброшены.')
-    else:
-        update.message.reply_text('Учет не ведется.')
-    conn.close()
 
 def owe(update: Update, context: CallbackContext) -> None:
     message = update.message
@@ -188,6 +161,16 @@ def update_summary_message(bot: Bot, chat_id: int) -> None:
         user_totals.setdefault(user_id, 0.0)
 
     summary_lines = []
+
+    cursor.execute("SELECT e.amount, e.description, u.name as user_name FROM expenses e JOIN users u ON e.user_id = u.user_id WHERE e.chat_id = ? ORDER BY e.message_id DESC", (chat_id,))
+    all_expenses_details = cursor.fetchall()
+
+    if all_expenses_details:
+        summary_lines.append("*Детализация расходов:*")
+        for expense in all_expenses_details:
+            summary_lines.append(f"  - {expense['amount']:.2f} ({expense['user_name']}): {expense['description']}")
+        summary_lines.append("")
+
     if any(v > 0 for v in user_totals.values()):
         total_spent = sum(user_totals.values())
         num_users = len(user_totals)
@@ -199,7 +182,7 @@ def update_summary_message(bot: Bot, chat_id: int) -> None:
             summary_lines.append(f"  - {user_names.get(user_id, 'Unknown')}: {total:.2f} лир")
         summary_lines.extend([f"\n*Всего потрачено:* {total_spent:.2f} лир", f"*Средний расход:* {average_spent:.2f} лир"])
 
-    cursor.execute("SELECT d.from_user_id, u1.name as from_name, d.to_user_id, u2.name as to_name, d.amount, d.reason FROM debts d JOIN users u1 ON d.from_user_id = u1.user_id JOIN users u2 ON d.to_user_id = u2.user_id WHERE d.chat_id = ?", (chat_id,))
+    cursor.execute("SELECT u1.name as from_name, u2.name as to_name, d.amount, d.reason, d.from_user_id, d.to_user_id FROM debts d JOIN users u1 ON d.from_user_id = u1.user_id JOIN users u2 ON d.to_user_id = u2.user_id WHERE d.chat_id = ?", (chat_id,))
     debts_data = cursor.fetchall()
     if debts_data:
         summary_lines.append("\n*Личные долги:*")
@@ -225,15 +208,18 @@ def update_summary_message(bot: Bot, chat_id: int) -> None:
 
     final_text = '📊 **Учет общих расходов**\n\n' + ('Расходы пока не заведены.' if not summary_lines else '```\n' + '\n'.join(summary_lines) + '\n```')
 
+    if len(final_text) > 4096:
+        final_text = final_text[:4090] + "\n...```"
+
     try:
-        bot.edit_message_text(chat_id=chat_id, message_id=summary_message_id, text=final_text, parse_mode=ParseMode.MARKDOWN_V2)
+        bot.edit_message_text(chat_id=chat_id, message_id=summary_message_id, text=final_text, parse_mode=ParseMode.MARKDOWN)
     except BadRequest as e:
         if 'Message to edit not found' in str(e):
             logger.warning("Старое закрепленное сообщение не найдено. Создаю новое.")
             try:
                 bot.unpin_all_chat_messages(chat_id=chat_id)
             except Exception: pass
-            new_message = bot.send_message(chat_id=chat_id, text=final_text, parse_mode=ParseMode.MARKDOWN_V2)
+            new_message = bot.send_message(chat_id=chat_id, text=final_text, parse_mode=ParseMode.MARKDOWN)
             bot.pin_chat_message(chat_id=chat_id, message_id=new_message.message_id)
             cursor.execute("UPDATE chats SET message_id = ? WHERE chat_id = ?", (new_message.message_id, chat_id))
             conn.commit()
@@ -242,10 +228,3 @@ def update_summary_message(bot: Bot, chat_id: int) -> None:
         else:
             logger.error(f"Ошибка BadRequest при обновлении сообщения: {e}")
     conn.close()
-
-def inactive_chat_handler(update: Update, context: CallbackContext) -> None:
-    if ENV == 'test':
-        message = "Бот запущен в режиме разработки. Повторите попытку позже."
-    else:
-        message = "Это тестовый чат. Бот работает в основном режиме."
-    update.message.reply_text(message)
