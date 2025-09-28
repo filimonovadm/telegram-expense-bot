@@ -1,0 +1,6 @@
+firebase-functions==0.2.0
+firebase-admin==6.5.0
+python-telegram-bot==13.15
+Flask==3.0.3
+urllib3<2.0
+python-dotenv==1.1.1

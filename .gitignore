@@ -15,3 +15,7 @@ Releases/
 
 # Архивные и одноразовые файлы
 _archive/
+
+# Ключи сервисных аккаунтов
+firebase_credentials.json
+functions/.env
